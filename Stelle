@@ -1,0 +1,468 @@
+//#include <RFM12B.h> //Pin assignments in header file were updated //#include <avr/sleep.h>
+//#include <SPI.h>
+#include <LiquidCrystal.h>
+#include <NewPing.h> #define TF 5
+#define EF 4
+#define TS 3
+#define ES 2
+#define MAX_DISTANCE 300
+// Things needed to initialize the radio (telling it what ID it has // and what network it’s on)
+#define NODEID
+#define NETWORKID
+2 //RF: network ID used for this unit, //takes values from 1-127,
+//0 is reserved for sending broadcast //messages (send to all nodes)
+99 //RF: the network ID we are on //(takes values from 0-255)
+#define GATEWAYID
+#define ACK_TIME
+#define SERIAL_BAUD 9600
+ 1  //RF: the node ID we’re sending to
+50  //RF: # of ms to wait for an ack
+LiquidCrystal lcd(22, 23, 24, 25, 26, 27);
+NewPing sonarF(TF,EF,MAX_DISTANCE); NewPing sonarS(TS,ES,MAX_DISTANCE);
+
+//Motor pin values
+const int m1Pin1 = 6;
+const int m1Pin2 = 9;
+const int m2Pin1 = 10;
+const int m2Pin2 = 11;
+bool Fwd = false;
+bool Rev = false;
+bool rTurn = false;
+bool lTurn = false;
+bool halt = false;
+int LSpeedModif = 255;
+int RSpeedModif = 252;
+//Corner Entry Button
+int buttonPin = 30;
+int maxCorners = 3;
+bool startMode = true;
+int startButton = 32;
+int buttonState = 0;
+int lastButtonState = 0;
+int cornersDone = 0;
+const int rightTurnTime = 460;
+//515 for USB power
+//Value averaging
+int Freading1 = 0;
+int Freading2 = 0;
+int Freading3 = 0;
+int Sreading1 = 0;
+int Sreading2 = 0;
+int Sreading3 = 0;
+int readingCounter = 0;
+bool getStarted = false;
+int frontAvg;
+int sideAvg;
+//Encoder
+int pinA1 = 8;
+int pinB1 = 7;
+int pinA2 = 12;
+int pinB2 = 13;
+double rMotorPos = 0;
+
+double lMotorPos = 0;
+int pinA1Last;
+int pinA2Last;
+int A1Val;
+int A2Val;
+boolean bCW1;
+boolean bCW2;
+boolean ldouble = false;
+boolean rdouble = false;
+//distance measurement
+double motorDistance;
+double Measurement[100];
+double wheelCircumference = 20.41; double bodylength = 10;
+/*RF Chip
+- Optional encryption key, to start call .Encrypt(KEY) to stop call .Encrypt(NULL) - Wait interPacketDelay ms between sending packets
+- Create an instance of the radio module and initialize variables used in .Send() - The char array payload[] can be char[89], but for now char[18] is fine
+*/
+/*
+uint8_t KEY[] = "Idontthinkwewillusethis";
+int interPacketDelay = 1000;
+RFM12B radio;
+byte sendSize = 0;
+char payload[] = "temporary payload";
+bool requestACK=false;
+*/
+void setup() {
+  //Motor Pin setup and default values
+  pinMode(m1Pin1, OUTPUT);
+  pinMode(m1Pin2, OUTPUT);
+  pinMode(m2Pin1, OUTPUT);
+  pinMode(m2Pin2, OUTPUT);
+  analogWrite(m1Pin1, 0);
+  analogWrite(m2Pin2, 0);
+  analogWrite(m2Pin1, 0);
+  analogWrite(m2Pin1, 0);
+  //Encoders
+  pinMode(pinA1, INPUT);
+  pinMode(pinB1, INPUT);
+  pinMode(pinA2, INPUT);
+
+
+pinMode(pinB2, INPUT);
+  //Button
+  pinMode(buttonPin, INPUT);
+  pinMode(startButton, INPUT);
+  //Read Pin A: Whatever state it’s in will reflect the last position
+  pinA1Last = digitalRead(pinA1);
+  pinA2Last = digitalRead(pinA2);
+lcd.begin(16,2); Serial.begin(9600);
+/*RF setup
+- Encryption is optional
+- Sleep right away to save power
+- Print "rf setup ok" for testing only
+*/
+/*
+radio.Initialize(NODEID, RF12_915MHZ, NETWORKID); radio.Encrypt(KEY);
+radio.Sleep(); Serial.println("Transmitting...\n\n");
+*/
+}
+//------------------------- Functions -------------------------------------------
+/*
+ * RF transmission of distance data (frontAvg and sideAvg) to Jeenode
+ */
+/*
+ * For convenience sake, simple stop call
+ */
+void stop() {
+ halt = true;
+ motorDriver();
+}
+/*
+ * Handles motor direction/control/speed ratio’
+ * Still to implement: Rotary encoder input that compares
+
+ * left to right motor rotations and completes auto-calibration on the fly * Thus LSpeed/RSpeed values are temporary
+*/
+void motorDriver() {
+  //Original speed veering ratio 250/255 m1/m2
+  int LSpeed = 250;
+  int RSpeed = 255;
+  if (halt){
+    analogWrite(m1Pin1, 0);
+    analogWrite(m1Pin2, 0);
+    analogWrite(m2Pin1, 0);
+    analogWrite(m2Pin2, 0);
+    Fwd = false;
+    Rev = false;
+    rTurn = false;
+    lTurn = false;
+    halt = false; //Disables itself afterwards
+    }
+   else if (lTurn){
+      analogWrite(m1Pin1, 0);
+      analogWrite(m1Pin2, LSpeed);
+      analogWrite(m2Pin1, 0);
+      analogWrite(m2Pin2, RSpeed);
+    }
+    else if (rTurn){
+      analogWrite(m1Pin1, LSpeed);
+      analogWrite(m1Pin2, 0);
+      analogWrite(m2Pin1, RSpeed);
+      analogWrite(m2Pin2, 0);
+    }
+    else if (Fwd){
+      analogWrite(m1Pin1, LSpeedModif);
+      analogWrite(m1Pin2, 0);
+      analogWrite(m2Pin1, 0);
+      analogWrite(m2Pin2, RSpeedModif);
+    }
+    else if (Rev){
+      analogWrite(m1Pin1, 0);
+      analogWrite(m1Pin2, LSpeed);
+      analogWrite(m2Pin1, RSpeed);
+      analogWrite(m2Pin2, 0);
+}
+else {
+      analogWrite(m1Pin1, 0);
+
+            analogWrite(m1Pin2, 0);
+      analogWrite(m2Pin1, 0);
+      analogWrite(m2Pin2, 0);
+} }
+/*
+ * Side and Front instantaneous sensor readings
+ */
+int getFrontSensor() {
+int dist = sonarF.convert_cm(sonarF.ping_median(5)); return dist;
+}
+int getSideSensor() {
+int dist = sonarS.convert_cm(sonarS.ping_median(5)); return dist;
+}
+/*
+ * LCD code to update sensor distances (for monitoring)
+ */
+void lcdUpdate() { lcd.clear();
+lcd.setCursor(0,0); lcd.print("F:"); //lcd.print(getFrontSensor()); lcd.print(frontAvg); delay(10);
+lcd.setCursor(0,1); lcd.print("S:"); //lcd.print(getSideSensor()); lcd.print(sideAvg); delay(10);
+}
+/*
+ * WIP Code for interfacing with Rotary encoders
+ */
+void rotaryEncoder(){
+   //right axle encoder
+   A1Val = digitalRead(pinA1);  //reads value of pinA1
+     if (A1Val != pinA1Last){ //If the value of pinA1, then we know
+                              //that the encoder has rotated
+
+                              if (digitalRead(pinB1) != A1Val) { //Reads pinB1, if it is //different than A1, then it //has rotated CW. If its the
+//same then it has rotated CCW rMotorPos -=15; //decreases value of motor position
+bCW1 = true;
+     } else {
+       bCW1= false;
+       rMotorPos +=15;
+}
+      //serial print out used in testing of the encoder position
+      /*if(rdouble){
+Serial.print ("Right Motor Rotated: "); if (!bCW1){
+Serial.println ("clockwise"); } else {
+Serial.println("counterclockwise"); }
+Serial.print("Encoder Position: "); Serial.println(rMotorPos);
+rdouble = false;
+      } else {
+       rdouble = true;
+} */ }
+ pinA1Last = A1Val; //sets pinA1Last as current A1Val to be compared
+                    //with the new A1Val in the next cycle
+//left axle encoder
+//same logic as right motor
+A2Val = digitalRead(pinA2);
+ if (A2Val != pinA2Last){
+     if (digitalRead(pinB2) != A2Val) {
+lMotorPos -=15; //bCW2 = true;
+     } else {
+       //bCW2 = false;
+       lMotorPos +=15;
+}
+/*if(ldouble){
+Serial.print ("Left Motor Rotated: ");
+
+if (bCW1){
+Serial.println ("clockwise");
+} else { Serial.println("counterclockwise");
+}
+Serial.print("Encoder Position: "); Serial.println(lMotorPos);
+ldouble = false;
+        } else {
+          ldouble = true;
+} */ }
+}
+void courseCorrection(){
+    if(getSideSensor() < 10){ //Getting closer to the wall
+if(LSpeedModif == 255) { RSpeedModif -=2;
+        } else if(RSpeedModif == 120){
+          LSpeedModif +=2;
+} else { LSpeedModif +=1; RSpeedModif -=1;
+}
+    } else if(getSideSensor() > 12) { //Going too far away from da wall
+        if(RSpeedModif == 255) {
+} }
+LSpeedModif -=2;
+} else if(LSpeedModif == 120){
+  RSpeedModif +=2;
+} else {
+  RSpeedModif +=1;
+LSpeedModif -=1; }
+void resetSensors(bool isCorner) {
+   /*
+   * Bug Fix:
+   * In order to fix infinite loop of STEELE looking "back and forth"
+   * We implement a reset of the side average value
+   * (this wasn’t being updated in between loop runs and thus
+   * still thinks its further from the wall than it actually is)
+   */
+  Sreading3 = getSideSensor();
+
+  Sreading2 = getSideSensor();
+  Sreading1 = getSideSensor();
+  Freading3 = getFrontSensor();
+  Freading2 = getFrontSensor();
+  Freading1 = getFrontSensor();
+  //Encoder Reset States
+   pinA1Last = digitalRead(pinA1);
+   pinA2Last = digitalRead(pinA2);
+if (isCorner) {
+//Collects measurements Measurement[cornersDone] = measurement(); lcd.clear();
+lcd.setCursor(0,0);
+lcd.print("Distance travelled:"); lcd.setCursor(0,1); lcd.print(Measurement[cornersDone]); delay(2000);
+//Increment corners
+cornersDone++;
+if (cornersDone == maxCorners) { // We’ve done the whole room lcd.clear();
+lcd.setCursor(0,0);
+lcd.print("Room done");
+delay(2000);
+lcd.setCursor(0,1);
+lcd.print("Press RST.");
+while (true) //Need some kind of stop-all command here {
+      delay(10000);
+    }
+} }
+}
+/* *
+ */
+double measurement(){
+  int distance = 0;
+  distance = motorDistance*wheelCircumference/360;
+
+  distance += 2*getFrontSensor();
+  distance += 2*bodylength;
+  return distance;
+}
+void loop() {
+/*
+ * When we start initially, We want to ask the user to enter
+* how many walls there are in the room.
+* We do this by sequential push button entry.
+* It also outputs to the LED.
+* By default, we have 4 corners. */
+if (startMode) {
+buttonState = digitalRead(buttonPin); lcd.clear();
+lcd.setCursor(0,0);
+lcd.print("Enter Corners: "); lcd.setCursor(0,1); lcd.print(maxCorners);
+delay(10);
+if (digitalRead(buttonPin) == HIGH) {
+    maxCorners = maxCorners + 1;
+    delay(200);
+  }
+if (digitalRead(startButton) == HIGH) { startMode = false;
+lcd.clear();
+lcd.setCursor(0,1); lcd.print("Starting..."); delay(2000);
+}
+  lastButtonState = buttonState;
+}
+else {
+  //Take the last 3 readings and average them because
+  //there are spikes in the sensor data
+  Freading3 = Freading2;
+  Freading2 = Freading1;
+  Freading1 = getFrontSensor();
+
+Sreading3 = Sreading2;
+Sreading2 = Sreading1;
+Sreading1 = getSideSensor();
+readingCounter++;
+//waits for averaging to happen x3 before doing anything
+if (readingCounter > 2)
+{
+  frontAvg = (Freading3 + Freading2 + Freading1) /3;
+  sideAvg =  (Sreading3 + Sreading2 + Sreading1) /3;
+  //readingCounter = 0;
+  getStarted = true;
+}
+//If we have at least 3 values recorded:
+if (getStarted) {
+    Fwd = true;
+    motorDriver();
+    lcdUpdate();
+    rotaryEncoder();
+    courseCorrection();
+    /* With the vehicle now moving forward, three things can happen:
+1. Hits a corner (wall detection kicks in)
+2. Veers off the wall, in which case side Alignment needs to be run
+3. Obtuse corner (Assuming 90 degrees as we have no way to check
+          angle with current sensors)
+    */
+    if ((getSideSensor() > 50) || (sideAvg == 0)) { //Obtuse Corner!
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Obtuse Corner"); stop();
+delay(2000);
+/*
+       * At this point we’ve already gone a bit past the corner,
+          so we reverse for a bit
+       */
+      Rev = true;
+      motorDriver();
+      delay(500);
+      stop();
+      delay(1000);
+
+      motorDistance = lMotorPos;
+     /*
+     rMotorPos = 0;
+     lMotorPos = 0;
+while(lMotorPos < 45){ rotaryEncoder(); lTurn = true; motorDriver(); lcd.clear(); lcd.setCursor(0,0); lcd.print(lMotorPos); lcd.setCursor(0,1); lcd.print(rMotorPos); delay(50);
+}
+*/
+lTurn = true;
+motorDriver();
+delay(rightTurnTime);
+stop();
+delay(1000);
+//Robot should be aligned to new wall now Fwd = true;
+motorDriver();
+delay(1000); //Delay for wall adjacency stop();
+lcd.clear();
+lcd.setCursor(0,0);
+lcd.print("Corner Done.");
+     resetSensors(true);
+     delay(2000);
+ }//End Obtuse Corner
+ /*
+else if ((getSideSensor() > 30) && (sideAvg < 50)){ //Side Alignment
+int adjacent = sideAvg; stop();
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Aligning..."); delay(1000);
+
+lTurn = true;
+  motorDriver();
+  delay(rightTurnTime);
+  stop();
+  delay(1000);
+  //Move back towards wall
+  while ((getFrontSensor() > 22) || (getFrontSensor() < 5)){
+Fwd = true;
+motorDriver();
+delay(10);
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Aligning..."); lcd.setCursor(0,1); lcd.print("F:"); lcd.print(getFrontSensor());
+}
+stop();
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Turning back.."); delay(1000);
+//Turn to parallel
+rTurn = true; motorDriver(); delay(rightTurnTime - 7);
+stop();
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Aligned by"); lcd.setCursor(0,1); lcd.print(adjacent); lcd.print(" cm");
+  resetSensors(false);
+  delay(3000);
+} //end Side alignment
+*/
+if ((getFrontSensor() < 17) && (frontAvg > 2)) { //Acute Corner
+stop();
+lcd.clear(); 
+lcd.setCursor(0,0); 
+lcd.print("Corner Detect");
+
+delay(1000);
+//Turn to parallel lcd.clear(); lcd.setCursor(0,0); lcd.print("Turning back..");
+motorDistance = lMotorPos;
+/*
+  rMotorPos = 0;
+  lMotorPos = 0;
+while(lMotorPos < 45){ rotaryEncoder(); rTurn = true; motorDriver(); lcd.clear(); lcd.setCursor(0,0); lcd.print(lMotorPos); lcd.setCursor(0,1); lcd.print(rMotorPos); delay(10);
+}
+*/
+rTurn = true; motorDriver(); delay(rightTurnTime -7); /*
+* The following code is applied to turning on non-right angle corners.
+* The sensors find when the distance in front of STEELE is clear (corner done)
+* However, this is not effective with HC-SR04 sensors
+* as they have issues detecting distances on angled walls. *
+* For now, we only implmement right angle acute turns. */
+/*
+while (!((getFrontSensor() > 100) || (getFrontSensor() == 0))) { //<--- calibrate
+rTurn = true;
+motorDriver();
+delay(10);
+lcd.clear(); lcd.setCursor(0,0); 
+lcd.print("Corner Detect"); 
+lcd.setCursor(0,1); lcd.print("F:"); 
+lcd.print(getFrontSensor());
+}
+*/
+stop();
+delay(1000);
+lcd.clear(); lcd.setCursor(0,0); lcd.print("Corner Done."); lcd.setCursor(0,1);
+      resetSensors(true);
+      delay(2000);
+     }
+}
+} 
+}
